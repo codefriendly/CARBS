@@ -5,18 +5,20 @@
 
 ### OPTIONS AND VARIABLES ###
 
-while getopts ":a:r:p:h" o; do case "${o}" in
-	h) printf "Optional arguments for custom use:\\n  -r: Dotfiles repository (local file or url)\\n  -p: Dependencies and programs csv (local file or url)\\n  -a: AUR helper (must have pacman-like syntax)\\n  -h: Show this message\\n" && exit ;;
+while getopts ":a:r:b:p:h" o; do case "${o}" in
+	h) printf "Optional arguments for custom use:\\n  -r: Dotfiles repository (local file or url)\\n  -b: Dotfiles branch (master is assumed otherwise)\\n  -p: Dependencies and programs csv (local file or url)\\n  -a: AUR helper (must have pacman-like syntax)\\n  -h: Show this message\\n" && exit ;;
 	r) dotfilesrepo=${OPTARG} && git ls-remote "$dotfilesrepo" || exit ;;
+	b) repobranch=${OPTARG} ;;
 	p) progsfile=${OPTARG} ;;
 	a) aurhelper=${OPTARG} ;;
 	*) printf "Invalid option: -%s\\n" "$OPTARG" && exit ;;
 esac done
 
 # DEFAULTS:
-[ -z "$dotfilesrepo" ] && dotfilesrepo="https://github.com/lukesmithxyz/voidrice.git"
-[ -z "$progsfile" ] && progsfile="https://raw.githubusercontent.com/LukeSmithxyz/LARBS/master/progs.csv"
+[ -z "$dotfilesrepo" ] && dotfilesrepo="https://github.com/lukesmithxyz/voidrice.git" && repobranch="archi3"
+[ -z "$progsfile" ] && progsfile="https://raw.githubusercontent.com/LukeSmithxyz/LARBS/master/archi3/progs.csv"
 [ -z "$aurhelper" ] && aurhelper="yay"
+[ -z "$repobranch" ] && repobranch="master"
 
 ### FUNCTIONS ###
 
@@ -97,6 +99,12 @@ aurinstall() { \
 	sudo -u "$name" $aurhelper -S --noconfirm "$1" >/dev/null 2>&1
 	}
 
+pipinstall() { \
+	dialog --title "LARBS Installation" --infobox "Installing the Python package \`$1\` ($n of $total). $1 $2" 5 70
+	command -v pip || pacman -S --noconfirm --needed python-pip >/dev/null 2>&1
+	yes | pip install "$1"
+	}
+
 installationloop() { \
 	([ -f "$progsfile" ] && cp "$progsfile" /tmp/progs.csv) || curl -Ls "$progsfile" | sed '/^#/d' > /tmp/progs.csv
 	total=$(wc -l < /tmp/progs.csv)
@@ -108,16 +116,18 @@ installationloop() { \
 			"") maininstall "$program" "$comment" ;;
 			"A") aurinstall "$program" "$comment" ;;
 			"G") gitmakeinstall "$program" "$comment" ;;
+			"P") pipinstall "$program" "$comment" ;;
 		esac
 	done < /tmp/progs.csv ;}
 
 putgitrepo() { # Downlods a gitrepo $1 and places the files in $2 only overwriting conflicts
 	dialog --infobox "Downloading and installing config files..." 4 60
+	[ -z "$3" ] && branch="master" || branch="$repobranch"
 	dir=$(mktemp -d)
-	chown -R "$name":wheel "$dir"
-	sudo -u "$name" git clone --depth 1 "$1" "$dir/gitrepo" >/dev/null 2>&1 &&
-	sudo -u "$name" mkdir -p "$2" &&
-	sudo -u "$name" cp -rfT "$dir"/gitrepo "$2"
+	[ ! -d "$2" ] && mkdir -p "$2" && chown -R "$name:wheel" "$2"
+	chown -R "$name:wheel" "$dir"
+	sudo -u "$name" git clone -b "$branch" --depth 1 "$1" "$dir/gitrepo" >/dev/null 2>&1 &&
+	sudo -u "$name" cp -rfT "$dir/gitrepo" "$2"
 	}
 
 serviceinit() { for service in "$@"; do
@@ -136,7 +146,7 @@ resetpulse() { dialog --infobox "Reseting Pulseaudio..." 4 50
 
 finalize(){ \
 	dialog --infobox "Preparing welcome message..." 4 50
-	echo "exec_always --no-startup-id notify-send -i ~/.scripts/pix/larbs.png '<b>Welcome to LARBS:</b> Press Super+F1 for the manual.' -t 10000"  >> "/home/$name/.config/i3/config"
+	echo "exec_always --no-startup-id notify-send -i ~/.local/share/larbs/larbs.png 'Welcome to LARBS:' 'Press Super+F1 for the manual.' -t 10000"  >> "/home/$name/.config/i3/config"
 	dialog --title "All done!" --msgbox "Congrats! Provided there were no hidden errors, the script completed successfully and all the programs and configuration files should be in place.\\n\\nTo run the new graphical environment, log out and log back in as your new user, then run the command \"startx\" to start the graphical environment (it will start automatically in tty1).\\n\\n.t Luke" 12 80
 	}
 
@@ -174,8 +184,9 @@ pacman --noconfirm --needed -S base-devel git >/dev/null 2>&1
 # in a fakeroot environment, this is required for all builds with AUR.
 newperms "%wheel ALL=(ALL) NOPASSWD: ALL"
 
-# Make pacman and yay colorful because why not.
-sed -i "s/^#Color/Color/g" /etc/pacman.conf
+# Make pacman and yay colorful and adds eye candy on the progress bar because why not.
+grep "^Color" /etc/pacman.conf >/dev/null || sed -i "s/^#Color/Color/" /etc/pacman.conf
+grep "ILoveCandy" /etc/pacman.conf >/dev/null || sed -i "/#VerbosePkgLists/a ILoveCandy" /etc/pacman.conf
 
 # Use all cores for compilation.
 sed -i "s/-j2/-j$(nproc)/;s/^#MAKEFLAGS/MAKEFLAGS/" /etc/makepkg.conf
@@ -189,18 +200,14 @@ manualinstall $aurhelper || error "Failed to install AUR helper."
 installationloop
 
 # Install the dotfiles in the user's home directory
-putgitrepo "$dotfilesrepo" "/home/$name" || error "Programs have installed, but dotfiles failed to deploy."
+putgitrepo "$dotfilesrepo" "/home/$name" "$repobranch"
+rm -f "/home/$name/README.md" "/home/$name/LICENSE"
 
 # Install the LARBS Firefox profile in ~/.mozilla/firefox/
 putgitrepo "https://github.com/LukeSmithxyz/mozillarbs.git" "/home/$name/.mozilla/firefox"
 
 # Pulseaudio, if/when initially installed, often needs a restart to work immediately.
 [ -f /usr/bin/pulseaudio ] && resetpulse
-
-# Install vim `plugged` plugins.
-dialog --infobox "Installing (neo)vim plugins..." 4 50
-(sleep 30 && killall nvim) &
-sudo -u "$name" nvim -E -c "PlugUpdate|visual|q|q" >/dev/null 2>&1
 
 # Enable services here.
 serviceinit NetworkManager cronie
